@@ -1,50 +1,34 @@
+import type * as THREE from "three";
+
 export type Phase =
-  | 'title'
-  | 'entering'
-  | 'room'
-  | 'approach'
-  | 'focus'
-  | 'swallow'
-  | 'world'
-  | 'collapse'
-  | 'returned';
+  | "boot"
+  | "title"
+  | "room"
+  | "focus"
+  | "eaten"
+  | "world"
+  | "collapse"
+  | "landing"
+  | "aftermath";
 
-export interface GameSnapshot {
-  phase: Phase;
-  paused: boolean;
-  consoleOpen: boolean;
-  pointerLocked: boolean;
-  nearPC: boolean;
-  faceHovered: boolean;
-  progress: number;
-  discovered: boolean;
-  message: string;
+export interface Interactable {
+  id: string;
+  anchor: THREE.Vector3;
+  radius: number;
+  label: string;
+  hint?: string;
+  onInteract: () => void;
+  isActive?: () => boolean;
 }
 
-export interface GamePreferences {
-  volume: number;
-  muted: boolean;
-  gentle: boolean;
-  quality: 'high' | 'low';
+export interface FocusPose {
+  position: THREE.Vector3;
+  target: THREE.Vector3;
 }
 
-export const initialSnapshot: GameSnapshot = {
-  phase: 'title',
-  paused: false,
-  consoleOpen: false,
-  pointerLocked: false,
-  nearPC: false,
-  faceHovered: false,
-  progress: 0,
-  discovered: false,
-  message: '',
-};
-
-export const isPlayable = (phase: Phase) =>
-  phase === 'room' || phase === 'world' || phase === 'returned';
-
-export const isCinematic = (phase: Phase) =>
-  phase === 'entering' ||
-  phase === 'approach' ||
-  phase === 'swallow' ||
-  phase === 'collapse';
+export interface Subtitle {
+  text: string;
+  sub?: string;
+  duration: number;
+  id: number;
+}

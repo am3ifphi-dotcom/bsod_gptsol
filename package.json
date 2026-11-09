@@ -1,32 +1,29 @@
 {
-  "name": "react-vite-tailwind",
+  "name": "not-responding",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+    "dev": "vite --host 0.0.0.0 --port 5173",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 0.0.0.0 --port 5173",
+    "check:shaders": "node scripts/check-shaders.mjs",
+    "verify": "npm run check:shaders && npm run build"
   },
   "dependencies": {
-    "@types/three": "^0.186.0",
-    "clsx": "2.1.1",
-    "framer-motion": "^13.4.6",
-    "lucide-react": "^1.49.0",
-    "react": "19.2.6",
-    "react-dom": "19.2.6",
-    "tailwind-merge": "3.4.0",
     "three": "^0.186.1"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "4.1.17",
-    "@types/node": "22.19.17",
-    "@types/react": "19.2.7",
-    "@types/react-dom": "19.2.3",
-    "@vitejs/plugin-react": "5.1.1",
-    "tailwindcss": "4.1.17",
-    "typescript": "5.9.3",
-    "vite": "7.3.2",
-    "vite-plugin-singlefile": "2.3.0"
+    "@moreplease/glslang": "^16.6.0-1",
+    "@napi-rs/canvas": "^1.1.0",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@types/three": "^0.186.0",
+    "@vitejs/plugin-react": "^5.1.1",
+    "jsdom": "^31.0.0",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.2"
   }
 }
