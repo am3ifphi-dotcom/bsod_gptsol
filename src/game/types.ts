@@ -1,50 +1,41 @@
 export type Phase =
+  | 'boot'
   | 'title'
-  | 'entering'
   | 'room'
-  | 'approach'
-  | 'focus'
-  | 'swallow'
+  | 'examine'
+  | 'devoured'
   | 'world'
   | 'collapse'
   | 'returned';
 
-export interface GameSnapshot {
-  phase: Phase;
-  paused: boolean;
-  consoleOpen: boolean;
-  pointerLocked: boolean;
-  nearPC: boolean;
-  faceHovered: boolean;
-  progress: number;
-  discovered: boolean;
-  message: string;
-}
-
-export interface GamePreferences {
+export interface Settings {
+  /** 0..100 */
   volume: number;
-  muted: boolean;
-  gentle: boolean;
   quality: 'high' | 'low';
+  reducedFlash: boolean;
 }
 
-export const initialSnapshot: GameSnapshot = {
-  phase: 'title',
-  paused: false,
-  consoleOpen: false,
-  pointerLocked: false,
-  nearPC: false,
-  faceHovered: false,
-  progress: 0,
-  discovered: false,
-  message: '',
-};
+export interface EngineEvents {
+  onPhase(phase: Phase): void;
+  /** Contextual prompt (bottom center). null hides it. */
+  onPrompt(text: string | null): void;
+  /** Transient toast line. */
+  onToast(text: string, ms?: number): void;
+  /** Cinematic subtitle / forced center line. null clears. */
+  onSubtitle(text: string | null): void;
+  onConsoleOpen(open: boolean): void;
+  onPauseRequest(): void;
+  /** Small objective line (top-left). null hides. */
+  onObjective(text: string | null): void;
+  /** 0..8 corruption clicks */
+  onCorruption(level: number): void;
+  /** First time the player reads WAKE_UP */
+  onWakeDiscovered(): void;
+  /** Player pressed R after the ending */
+  onRequestRestart(): void;
+}
 
-export const isPlayable = (phase: Phase) =>
-  phase === 'room' || phase === 'world' || phase === 'returned';
-
-export const isCinematic = (phase: Phase) =>
-  phase === 'entering' ||
-  phase === 'approach' ||
-  phase === 'swallow' ||
-  phase === 'collapse';
+export interface ConsoleLine {
+  text: string;
+  kind: 'in' | 'out' | 'err' | 'ok' | 'sys' | 'dim';
+}

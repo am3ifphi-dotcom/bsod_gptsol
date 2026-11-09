@@ -1,431 +1,383 @@
+/* The fatal-error realm — a walkable BSOD. Beautiful, vast, wrong. */
 import * as THREE from 'three';
-import { canvasTexture, glowTexture, surfaceTexture, textTexture } from './textures';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import {
+  fbm2,
+  makeCircuitGridTexture,
+  makeGlyphColumnTexture,
+  makeDialogTexture,
+  makeRuneRingTexture,
+  makeWakeTextTexture,
+  makeCrackTexture,
+  makeDotTexture,
+  seededRandom,
+} from './textures';
 
-const CENTER_X = 1.53;
-export const MONUMENT = new THREE.Vector3(CENTER_X, 0, -67);
-
-export const groundHeight = (x: number, z: number) => Math.sin(x * 0.14) * 0.16 + Math.sin((z + 23) * 0.15) * 0.1;
-
-interface Tile {
-  position: THREE.Vector3;
-  seed: number;
-}
-
-export interface WorldModel {
+export interface WorldBuild {
   group: THREE.Group;
-  monument: THREE.Group;
-  clue: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
-  floor: THREE.InstancedMesh;
-  cracks: THREE.Group;
-  update: (time: number, player: THREE.Vector3, gentle: boolean) => void;
-  beginCollapse: (player: THREE.Vector3) => void;
-  collapse: (elapsed: number, player: THREE.Vector3) => void;
-  reset: () => void;
+  /** distance from world center where WAKE_UP becomes readable */
+  revealRadius: number;
+  center: THREE.Vector3;
+  cray: THREE.Group;
+  daisCore: THREE.Mesh;
+  daisRing: THREE.Mesh;
+  wakeSign: THREE.Mesh;
+  halo: THREE.Mesh;
+  wakeLight: THREE.PointLight;
+  redBeacon: THREE.SpotLight;
+  crack: THREE.Mesh;
+  shards: THREE.Mesh[];
+  fallers: THREE.Mesh[];
+  colliders: { x: number; z: number; r: number }[];
+  boxColliders: { minX: number; maxX: number; minZ: number; maxZ: number }[];
+  boundsRadius: number;
+  spawn: { pos: THREE.Vector3; yaw: number };
+  surgeTimer: number;
+  floatingGlyphs: THREE.Mesh[];
+  rackLEDs: THREE.MeshStandardMaterial[];
 }
 
-function solid(
-  parent: THREE.Object3D,
-  dimensions: [number, number, number],
-  position: [number, number, number],
-  color: string,
-  outline = false,
-) {
-  const geometry = new THREE.BoxGeometry(...dimensions);
-  const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
-    color, metalness: 0.38, roughness: 0.53,
-  }));
-  mesh.position.set(...position);
-  mesh.receiveShadow = true;
-  parent.add(mesh);
-  if (outline) {
-    const edge = new THREE.LineSegments(new THREE.EdgesGeometry(geometry), new THREE.LineBasicMaterial({
-      color: '#558aff', transparent: true, opacity: 0.55,
-    }));
-    mesh.add(edge);
-  }
-  return mesh;
-}
+const WORLD_RADIUS = 66;
 
-function panel(parent: THREE.Object3D, text: string[], position: [number, number, number], width: number, height: number, rotation = 0) {
-  const texture = canvasTexture(1024, 640, (ctx) => {
-    ctx.fillStyle = '#0b48c9';
-    ctx.fillRect(0, 0, 1024, 640);
-    ctx.strokeStyle = '#9fbfff';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(3, 3, 1018, 634);
-    ctx.fillStyle = '#d5e4ff';
-    ctx.font = '24px monospace';
-    ctx.fillText('SYSTEM / EXCEPTION', 35, 50);
-    ctx.fillText('_  [ ]  x', 816, 50);
-    ctx.fillRect(0, 75, 1024, 1);
-    ctx.font = '42px monospace';
-    text.forEach((line, i) => ctx.fillText(line, 42, 155 + i * 73));
-    ctx.font = '19px monospace';
-    ctx.fillStyle = '#abc7ff';
-    ctx.fillText('MEMORY DUMP: 0x00000000', 43, 588);
-    ctx.fillStyle = '#021538';
-    ctx.fillRect(742, 252, 282, 39);
-    ctx.fillRect(0, 360, 306, 13);
-  });
-  const group = new THREE.Group();
-  group.position.set(...position);
-  group.rotation.y = rotation;
-  group.rotation.z = rotation * 0.07;
-  const plane = new THREE.Mesh(new THREE.PlaneGeometry(width, height), new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide }));
-  group.add(plane);
-  solid(group, [width + 0.04, height + 0.04, 0.045], [0, 0, -0.03], '#0b285b', true);
-  group.userData.originY = position[1];
-  parent.add(group);
-  return group;
-}
-
-export function createWorld(): WorldModel {
-  const group = new THREE.Group();
-  group.name = 'MEMORY_DUMP';
-  group.visible = false;
-  const tileTexture = surfaceTexture('tile');
-  const floorMaterial = new THREE.MeshStandardMaterial({ color: '#4278ce', map: tileTexture, roughness: 0.6, metalness: 0.48 });
-  const tiles: Tile[] = [];
-  for (let row = 0; row < 32; row++) {
-    for (let col = 0; col < 25; col++) {
-      const x = CENTER_X + (col - 12) * 2.72;
-      const z = -22 - row * 2.72;
-      tiles.push({ position: new THREE.Vector3(x, groundHeight(x, z) - 0.15, z), seed: ((row * 13 + col * 31) % 71) / 71 });
-    }
-  }
-  const floor = new THREE.InstancedMesh(new THREE.BoxGeometry(2.665, 0.3, 2.665), floorMaterial, tiles.length);
-  floor.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  floor.receiveShadow = true;
-  // Falling tiles leave their original bounding volume; disabling culling keeps the fall visible.
-  floor.frustumCulled = false;
-  const dummy = new THREE.Object3D();
-  tiles.forEach((tile, i) => {
-    dummy.position.copy(tile.position);
-    dummy.updateMatrix();
-    floor.setMatrixAt(i, dummy.matrix);
-    floor.setColorAt(i, new THREE.Color().setHSL(0.61 + tile.seed * 0.02, 0.67, 0.36 + tile.seed * 0.12));
-  });
-  group.add(floor);
-
-  const ribbonMaterial = new THREE.LineBasicMaterial({ color: '#a4c9ff', transparent: true, opacity: 0.46 });
-  for (const side of [-1, 1]) {
-    const points: THREE.Vector3[] = [];
-    for (let i = 0; i < 56; i++) {
-      const z = -23 - i * 0.77;
-      const x = CENTER_X + side * (2.2 + Math.sin(i * 0.1) * 0.7);
-      points.push(new THREE.Vector3(x, groundHeight(x, z) + 0.035, z));
-    }
-    group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), ribbonMaterial));
-  }
-
-  const monument = new THREE.Group();
-  monument.position.copy(MONUMENT);
-  group.add(monument);
-  solid(monument, [9, 0.45, 5.8], [0, 0.23, 0], '#12315c', true);
-  const left = solid(monument, [1.1, 13.4, 2.5], [-3.18, 7.25, 0], '#092456', true);
-  const right = solid(monument, [1.1, 13.4, 2.5], [3.18, 7.25, 0], '#092456', true);
-  left.rotation.z = 0.02;
-  right.rotation.z = -0.02;
-  solid(monument, [7.48, 1.07, 2.5], [0, 14.15, 0], '#173d81', true);
-  solid(monument, [4.84, 10.1, 0.6], [0, 8.41, -0.61], '#040e25', true);
-  const innerLight = new THREE.PointLight('#4f83ff', 24, 24, 2);
-  innerLight.position.set(0, 6.5, 3.3);
-  monument.add(innerLight);
-  const white = new THREE.MeshBasicMaterial({ color: '#dbe9ff' });
-  for (const y of [10.62, 9.48]) {
-    const dot = new THREE.Mesh(new THREE.SphereGeometry(0.24, 20, 16), white);
-    dot.position.set(-1.28, y, -0.06);
-    dot.scale.z = 0.25;
-    monument.add(dot);
-  }
-  const mouth = new THREE.Mesh(new THREE.TorusGeometry(1.5, 0.075, 8, 64, Math.PI), white);
-  mouth.rotation.z = Math.PI / 2;
-  mouth.position.set(1.07, 10.05, -0.05);
-  monument.add(mouth);
-  const errorLabel = new THREE.Mesh(new THREE.PlaneGeometry(4.7, 1.3), new THREE.MeshBasicMaterial({
-    map: textTexture(['A CONNECTION STILL EXISTS.', 'DO NOT SHUT DOWN.'], { width: 1024, height: 256, size: 35 }),
-    transparent: true, opacity: 0.67,
-  }));
-  errorLabel.position.set(0, 6.46, -0.08);
-  monument.add(errorLabel);
-  const smallLabel = new THREE.Mesh(new THREE.PlaneGeometry(4, 0.6), new THREE.MeshBasicMaterial({
-    map: textTexture(['RECOVERY ROUTINE / STORED MEMORY'], { width: 1024, height: 160, size: 28 }),
-    transparent: true, opacity: 0.55,
-  }));
-  smallLabel.position.set(0, 3.13, 1.29);
-  monument.add(smallLabel);
-  solid(monument, [4.6, 2.2, 0.3], [0, 1.66, 1.02], '#071b39', true);
-  const clue = new THREE.Mesh(new THREE.PlaneGeometry(3.9, 0.92), new THREE.MeshBasicMaterial({
-    map: textTexture(['WAKE_UP'], { width: 720, height: 170, size: 85, color: '#e7f2ff' }),
-    transparent: true, opacity: 0,
-  }));
-  clue.position.set(0.22, 1.83, 1.185);
-  monument.add(clue);
-
-  const halo = new THREE.Group();
-  halo.position.y = 17.2;
-  monument.add(halo);
-  const haloMat = new THREE.MeshBasicMaterial({ color: '#6da1ff', transparent: true, opacity: 0.68 });
-  for (let i = 0; i < 3; i++) {
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(3.9 + i * 0.38, 0.025, 6, 100, Math.PI * (1.3 + i * 0.18)), haloMat);
-    ring.rotation.set(Math.PI / 2 + i * 0.16, i * 0.08, i * 2.4);
-    halo.add(ring);
-  }
-  const crownPieces: THREE.Mesh[] = [];
-  for (let i = 0; i < 11; i++) {
-    const angle = i * 2.4;
-    const piece = solid(monument, [0.4 + (i % 3) * 0.4, 0.75 + (i % 4) * 0.55, 0.65], [Math.sin(angle) * 2.6, 16.3 + (i % 3) * 0.65, Math.cos(angle) * 2.3], '#224e94', true);
-    piece.rotation.set(i * 0.2, i * 0.6, i * 0.18);
-    piece.userData.origin = piece.position.clone();
-    crownPieces.push(piece);
-  }
-
-  const buildings = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial({
-    color: '#082356', metalness: 0.36, roughness: 0.7,
-  }), 104);
-  for (let i = 0; i < 104; i++) {
-    const side = i % 2 ? -1 : 1;
-    const x = CENTER_X + side * (15 + ((i * 7.19) % 39));
-    const z = -34 - ((i * 11.31) % 99);
-    const h = 6 + ((i * 9.17) % 38);
-    dummy.position.set(x, h / 2 - 1, z);
-    dummy.scale.set(1.8 + (i % 3) * 0.7, h, 1.7 + (i % 4) * 0.6);
-    dummy.rotation.set(0, (i % 5) * 0.02, (i % 3 - 1) * 0.014);
-    dummy.updateMatrix();
-    buildings.setMatrixAt(i, dummy.matrix);
-    buildings.setColorAt(i, new THREE.Color(i % 4 === 0 ? '#19529e' : '#0b2c67'));
-    if (i % 5 === 0) {
-      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([
-        new THREE.Vector3(x + 1, 0, z + 1), new THREE.Vector3(x + 1, h - 1, z + 1),
-      ]), new THREE.LineBasicMaterial({ color: '#478fff', transparent: true, opacity: 0.3 }));
-      group.add(line);
-    }
-  }
-  group.add(buildings);
-  dummy.scale.setScalar(1);
-  dummy.rotation.set(0, 0, 0);
-
-  const floatingPanels = [
-    panel(group, [':(', 'Your reality ran into', 'a problem.', '0% complete'], [-10.5, 5.6, -35], 5.7, 3.6, 0.38),
-    panel(group, ['FATAL EXCEPTION', '0x000000F4', 'No signal.', 'Are you still there?'], [11.6, 4.8, -45], 5.2, 3.3, -0.46),
-    panel(group, ['MEMORY CORRUPTED', 'You have been here', 'before.'], [-15.2, 9.2, -62], 7.2, 4.4, 0.38),
-    panel(group, ['SESSION 0317', 'Connection refused.', 'There is no outside.'], [15.1, 10.8, -83], 6.1, 3.9, -0.34),
-    panel(group, ['RESTORE POINT', '[ missing ]'], [-8.1, 2.7, -83], 3.7, 2.4, 0.9),
-  ];
-  const codeLabels: THREE.Mesh[] = [];
-  for (let i = 0; i < 12; i++) {
-    const code = new THREE.Mesh(new THREE.PlaneGeometry(3.7, 0.78), new THREE.MeshBasicMaterial({
-      map: textTexture([['0x00000000', 'PAGE_FAULT', 'NO_SIGNAL', 'MEMORY_LEAK'][i % 4]], { size: 51, width: 700, height: 150 }),
-      transparent: true, opacity: 0.38, side: THREE.DoubleSide,
-    }));
-    code.position.set(CENTER_X + Math.sin(i * 2.3) * (7 + i * 0.7), 2 + (i % 5) * 1.7, -29 - i * 5.2);
-    code.rotation.set(0, Math.sin(i) * 0.45, Math.sin(i * 1.6) * 0.07);
-    code.userData.originY = code.position.y;
-    group.add(code);
-    codeLabels.push(code);
-  }
-
-  const shards: THREE.Mesh[] = [];
-  for (let i = 0; i < 45; i++) {
-    const angle = i * 2.399;
-    const x = CENTER_X + Math.sin(angle) * (4.5 + (i % 7) * 2.8);
-    const z = -26 - ((i * 7.91) % 69);
-    const shard = solid(group, [0.2 + (i % 4) * 0.2, 0.35 + (i % 3) * 0.7, 0.09 + (i % 2) * 0.15], [x, 2.6 + (i % 7) * 1.3, z], i % 3 ? '#386bcb' : '#91b7ff', true);
-    shard.rotation.set(i * 0.7, i * 0.4, i * 0.15);
-    shard.userData.origin = shard.position.clone();
-    shards.push(shard);
-  }
-
-  const pointsGeometry = new THREE.BufferGeometry();
-  const pointsArray = new Float32Array(650 * 3);
-  for (let i = 0; i < 650; i++) {
-    pointsArray[i * 3] = CENTER_X + Math.sin(i * 137.71) * 52;
-    pointsArray[i * 3 + 1] = 0.6 + ((i * 7.137) % 45);
-    pointsArray[i * 3 + 2] = -24 - ((i * 17.413) % 120);
-  }
-  pointsGeometry.setAttribute('position', new THREE.BufferAttribute(pointsArray, 3));
-  const particles = new THREE.Points(pointsGeometry, new THREE.PointsMaterial({
-    color: '#bad5ff', size: 0.054, transparent: true, opacity: 0.6, depthWrite: false,
-  }));
-  group.add(particles);
-  const glowMap = glowTexture();
-  for (const position of [[-8, 9, -42], [8, 5, -59], [0, 18, -67], [13, 12, -91]]) {
-    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowMap, color: '#578bff', transparent: true, opacity: 0.26, depthWrite: false, blending: THREE.AdditiveBlending }));
-    sprite.position.set(position[0] + CENTER_X, position[1], position[2]);
-    sprite.scale.set(13, 23, 1);
-    group.add(sprite);
-  }
-  const ambient = new THREE.HemisphereLight('#8babff', '#091731', 1.9);
-  const directional = new THREE.DirectionalLight('#96beff', 3.1);
-  directional.position.set(-18, 35, -42);
-  directional.target.position.set(0, 0, -61);
-  group.add(ambient, directional, directional.target);
-  const arrivalLight = new THREE.PointLight('#accfff', 12, 22, 2);
-  arrivalLight.position.set(CENTER_X, 4.2, -26);
-  group.add(arrivalLight);
-  const cracks = new THREE.Group();
-  group.add(cracks);
-
-  const restoreTiles = () => {
-    dummy.scale.setScalar(1);
-    dummy.rotation.set(0, 0, 0);
-    tiles.forEach((tile, i) => {
-      dummy.position.copy(tile.position);
-      dummy.updateMatrix();
-      floor.setMatrixAt(i, dummy.matrix);
+export async function buildWorld(): Promise<WorldBuild> {
+  const loader = new GLTFLoader();
+  const load = (path: string) =>
+    new Promise<THREE.Group>((resolve, reject) => {
+      loader.load(path, (g) => resolve(g.scene as THREE.Group), undefined, reject);
     });
-    floor.instanceMatrix.needsUpdate = true;
-  };
 
-  return {
-    group, monument, clue, floor, cracks,
-    update(time, player, gentle) {
-      const motion = gentle ? 0.3 : 1;
-      halo.rotation.y = time * 0.055 * motion;
-      halo.rotation.z = Math.sin(time * 0.09) * 0.05 * motion;
-      crownPieces.forEach((piece, i) => {
-        piece.position.copy(piece.userData.origin as THREE.Vector3);
-        piece.position.y += Math.sin(time * 0.42 + i) * 0.23 * motion;
-        piece.rotation.y = i * 0.6 + time * 0.026 * motion;
-      });
-      shards.forEach((piece, i) => {
-        piece.position.copy(piece.userData.origin as THREE.Vector3);
-        piece.position.y += Math.sin(time * 0.37 + i * 1.9) * 0.37 * motion;
-        piece.rotation.y = i * 0.4 + time * 0.033 * motion;
-      });
-      floatingPanels.forEach((p, i) => {
-        p.position.y = (p.userData.originY as number) + Math.sin(time * 0.28 + i * 1.5) * 0.17 * motion;
-      });
-      codeLabels.forEach((p, i) => {
-        p.position.y = (p.userData.originY as number) + Math.sin(time * 0.4 + i) * 0.16 * motion;
-      });
-      particles.rotation.z = Math.sin(time * 0.008) * 0.001;
-      const distance = Math.hypot(player.x - CENTER_X, player.z + 67);
-      clue.material.opacity = THREE.MathUtils.clamp((13 - distance) / 4, 0, 1);
-    },
-    beginCollapse(player) {
-      cracks.children.forEach((child) => {
-        if (child instanceof THREE.Mesh) child.geometry.dispose();
-      });
-      cracks.clear();
-      cracks.position.set(player.x, groundHeight(player.x, player.z) + 0.028, player.z);
-      const crackMat = new THREE.MeshBasicMaterial({ color: '#b3d5ff', transparent: true, opacity: 0.96 });
-      for (let i = 0; i < 14; i++) {
-        const angle = i * Math.PI * 2 / 14;
-        const points: THREE.Vector3[] = [new THREE.Vector3(0, 0, 0)];
-        for (let j = 1; j < 9; j++) {
-          const radius = j * (0.9 + (i % 3) * 0.2);
-          const a = angle + Math.sin(j * 2.7 + i) * 0.11;
-          const x = Math.cos(a) * radius;
-          const z = Math.sin(a) * radius;
-          points.push(new THREE.Vector3(x, groundHeight(player.x + x, player.z + z) - groundHeight(player.x, player.z), z));
-        }
-        const crack = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(points), 24, 0.017 + (i % 2) * 0.011, 4, false), crackMat);
-        cracks.add(crack);
-      }
-      cracks.scale.set(0.005, 1, 0.005);
-      cracks.visible = true;
-    },
-    collapse(elapsed, player) {
-      const spread = THREE.MathUtils.smoothstep(elapsed, 1.6, 4.6);
-      cracks.scale.set(Math.max(0.005, spread), 1, Math.max(0.005, spread));
-      if (elapsed < 4.3) return;
-      tiles.forEach((tile, i) => {
-        const distance = Math.hypot(tile.position.x - player.x, tile.position.z - player.z);
-        const fall = Math.max(0, elapsed - 4.35 - distance * 0.035 - tile.seed * 0.25);
-        dummy.position.copy(tile.position);
-        dummy.position.y -= fall * fall * (3.2 + tile.seed * 1.9);
-        dummy.position.x += Math.sin(tile.seed * 41) * fall * 0.43;
-        dummy.position.z += Math.cos(tile.seed * 31) * fall * 0.43;
-        dummy.rotation.set(fall * Math.sin(tile.seed * 33) * 0.25, fall * tile.seed * 0.12, fall * Math.cos(tile.seed * 23) * 0.28);
-        dummy.scale.setScalar(1);
-        dummy.updateMatrix();
-        floor.setMatrixAt(i, dummy.matrix);
-      });
-      floor.instanceMatrix.needsUpdate = true;
-      cracks.position.y = groundHeight(player.x, player.z) + 0.028 - Math.pow(Math.max(0, elapsed - 4.65), 2) * 5;
-      crownPieces.forEach((piece, i) => {
-        piece.position.y -= Math.pow(Math.max(0, elapsed - 5 - i * 0.08), 2) * 0.19;
-        piece.rotation.z = Math.max(0, elapsed - 5) * (i % 2 ? 0.08 : -0.08);
-      });
-    },
-    reset() {
-      restoreTiles();
-      cracks.visible = false;
-      clue.material.opacity = 0;
-      monument.position.copy(MONUMENT);
-      monument.rotation.set(0, 0, 0);
-      crownPieces.forEach((piece, i) => {
-        piece.position.copy(piece.userData.origin as THREE.Vector3);
-        piece.rotation.set(i * 0.2, i * 0.6, i * 0.18);
-      });
-    },
-  };
-}
-
-export interface PassageModel {
-  group: THREE.Group;
-  face: THREE.Group;
-  rings: THREE.Mesh[];
-  update: (time: number, growth: number, gentle: boolean) => void;
-}
-
-export function createPassage(): PassageModel {
   const group = new THREE.Group();
-  group.position.set(CENTER_X, 1.684, -2.898);
-  group.visible = false;
-  const tunnel = new THREE.Mesh(new THREE.CylinderGeometry(0.66, 4.5, 19.5, 48, 20, true), new THREE.MeshBasicMaterial({
-    color: '#032572', side: THREE.BackSide,
-  }));
-  tunnel.rotation.x = Math.PI / 2;
-  tunnel.position.z = -9.75;
-  group.add(tunnel);
-  const rings: THREE.Mesh[] = [];
-  for (let i = 0; i < 22; i++) {
-    const fraction = i / 21;
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.66 + fraction * 3.84, 0.012 + fraction * 0.013, 5, 64), new THREE.MeshBasicMaterial({
-      color: i % 3 ? '#438aff' : '#b7d4ff', transparent: true, opacity: 0.32 + fraction * 0.2,
-    }));
-    ring.position.z = -fraction * 19.5;
-    ring.rotation.z = i * 0.12;
-    rings.push(ring);
-    group.add(ring);
+  group.name = 'glitchworld';
+  const rnd = seededRandom('world-seed');
+
+  /* ---------- lights & fog ---------- */
+  const hemi = new THREE.HemisphereLight(0x2b4a77, 0x02040a, 0.75);
+  group.add(hemi);
+  const moon = new THREE.DirectionalLight(0x9fd0ff, 0.65);
+  moon.position.set(-18, 32, 9);
+  group.add(moon);
+  const rimCyan = new THREE.PointLight(0x1ec8ff, 30, 60, 1.8);
+  rimCyan.position.set(16, 6, -14);
+  group.add(rimCyan);
+  const rimMagenta = new THREE.PointLight(0xb44bff, 18, 55, 1.8);
+  rimMagenta.position.set(-19, 8, 12);
+  group.add(rimMagenta);
+  const amber = new THREE.PointLight(0xff9a3c, 10, 40, 1.9);
+  amber.position.set(4, 2.5, 17);
+  group.add(amber);
+
+  /* ---------- terrain: displaced disc ---------- */
+  const TER = 140;
+  const terrainGeo = new THREE.CircleGeometry(WORLD_RADIUS + 14, 128, 0, Math.PI * 2);
+  terrainGeo.rotateX(-Math.PI / 2);
+  const posAttr = terrainGeo.attributes.position as THREE.BufferAttribute;
+  for (let i = 0; i < posAttr.count; i++) {
+    const x = posAttr.getX(i);
+    const z = posAttr.getZ(i);
+    const d = Math.sqrt(x * x + z * z);
+    const dune = (fbm2(x * 0.055 + 9, z * 0.055 + 3, 4) - 0.5) * 2.6;
+    const ridge = Math.pow(fbm2(x * 0.016 + 40, z * 0.016 + 8, 3), 2.2) * 9.5;
+    const rim = THREE.MathUtils.smoothstep(d, WORLD_RADIUS * 0.72, WORLD_RADIUS + 10);
+    const bowl = THREE.MathUtils.smoothstep(d, 4.5, 15);
+    const h = dune * bowl + ridge * rim - rim * 2.5;
+    posAttr.setY(i, h);
   }
-  const face = new THREE.Group();
-  face.position.z = 0.035;
-  group.add(face);
-  const faceMat = new THREE.MeshBasicMaterial({ color: '#ecf4ff' });
-  for (const y of [0.235, -0.105]) {
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.062, 20, 12), faceMat);
-    eye.position.set(-0.425, y, 0);
-    eye.scale.z = 0.5;
-    face.add(eye);
+  terrainGeo.computeVertexNormals();
+  const circuit = makeCircuitGridTexture();
+  circuit.wrapS = circuit.wrapT = THREE.RepeatWrapping;
+  const terrainMat = new THREE.MeshStandardMaterial({
+    color: 0x10305c,
+    emissive: 0x0a2b52,
+    emissiveMap: circuit,
+    emissiveIntensity: 0.85,
+    roughness: 0.94,
+    metalness: 0.15,
+  });
+  const terrain = new THREE.Mesh(terrainGeo, terrainMat);
+  terrain.receiveShadow = true;
+  group.add(terrain);
+
+  /* ---------- the dais: outer ring + crackable core ---------- */
+  const daisY = 0.16;
+  const daisRing = new THREE.Mesh(
+    new THREE.CylinderGeometry(9.4, 10.6, 1.15, 48, 1, true),
+    new THREE.MeshStandardMaterial({ color: 0x0d2547, emissive: 0x123c66, emissiveIntensity: 0.7, roughness: 0.6, metalness: 0.55, side: THREE.DoubleSide })
+  );
+  daisRing.position.y = daisY - 0.42;
+  group.add(daisRing);
+  const daisTop = new THREE.Mesh(
+    new THREE.RingGeometry(3.2, 9.4, 48),
+    new THREE.MeshStandardMaterial({ color: 0x11294a, emissive: 0x0e2f55, emissiveIntensity: 0.9, roughness: 0.5, metalness: 0.6 })
+  );
+  daisTop.rotation.x = -Math.PI / 2;
+  daisTop.position.y = daisY + 0.155;
+  group.add(daisTop);
+  const daisCore = new THREE.Mesh(
+    new THREE.CircleGeometry(3.3, 40),
+    new THREE.MeshStandardMaterial({ color: 0x16345c, emissive: 0x144a7a, emissiveIntensity: 1.15, roughness: 0.4, metalness: 0.7 })
+  );
+  daisCore.rotation.x = -Math.PI / 2;
+  daisCore.position.y = daisY + 0.155;
+  group.add(daisCore);
+  // rune halo on the outer rim
+  const runeTex = makeRuneRingTexture();
+  const halo = new THREE.Mesh(
+    new THREE.CylinderGeometry(9.4, 9.4, 0.62, 48, 1, true),
+    new THREE.MeshBasicMaterial({ map: runeTex, transparent: true, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false, color: 0x86f0ff, toneMapped: false, fog: false })
+  );
+  halo.position.y = daisY + 0.1;
+  group.add(halo);
+
+  /* ---------- crack decal on the dais (hidden until collapse) ---------- */
+  const crack = new THREE.Mesh(
+    new THREE.PlaneGeometry(6.4, 6.4),
+    new THREE.MeshBasicMaterial({ map: makeCrackTexture('dais'), transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending, color: 0x9df2ff, toneMapped: false, fog: false })
+  );
+  crack.rotation.x = -Math.PI / 2;
+  crack.rotation.z = 0.4;
+  crack.position.y = daisY + 0.17;
+  crack.renderOrder = 6;
+  group.add(crack);
+
+  /* ---------- THE structure: a Cray-1, colossal ---------- */
+  const cray = await load('/models/cray1.glb');
+  cray.scale.setScalar(11.5);
+  cray.position.set(0, daisY + 0.16, 0);
+  cray.rotation.y = Math.PI * 0.22;
+  group.add(cray);
+  const crayGlow = new THREE.PointLight(0x3fd8ff, 26, 26, 1.7);
+  crayGlow.position.set(0, 13, 0);
+  group.add(crayGlow);
+
+  /* ---------- floating monoliths in a ring ---------- */
+  const monolithGeo = new THREE.BoxGeometry(1.5, 6.2, 0.9);
+  const monolithMat = new THREE.MeshStandardMaterial({ color: 0x0a1a30, emissive: 0x0d3d63, emissiveIntensity: 1.5, roughness: 0.35, metalness: 0.7 });
+  const crackTexMono = makeCrackTexture('monolith');
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2 + 0.2;
+    const r = 15.5 + (i % 2) * 2.2;
+    const mono = new THREE.Mesh(monolithGeo, monolithMat);
+    mono.position.set(Math.cos(a) * r, 4.2 + (i % 3) * 1.3, Math.sin(a) * r);
+    mono.rotation.y = -a + Math.PI / 2;
+    mono.rotation.z = (rnd() - 0.5) * 0.14;
+    group.add(mono);
+    // glowing rune strip on each monolith
+    const strip = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.5, 4.6),
+      new THREE.MeshBasicMaterial({ map: crackTexMono, transparent: true, blending: THREE.AdditiveBlending, color: 0x5ce6ff, depthWrite: false, toneMapped: false })
+    );
+    strip.position.set(Math.cos(a) * (r - 0.5), mono.position.y, Math.sin(a) * (r - 0.5));
+    strip.lookAt(0, mono.position.y, 0);
+    group.add(strip);
   }
-  const mouth = new THREE.Mesh(new THREE.TorusGeometry(0.43, 0.032, 8, 64, Math.PI), faceMat);
-  mouth.rotation.z = Math.PI / 2;
-  mouth.position.set(0.31, 0.065, 0);
-  face.add(mouth);
-  for (let i = 0; i < 32; i++) {
-    const angle = i * 2.4;
-    const distance = 1.6 + (i % 8) * 2.15;
-    const radius = 0.64 + distance * 0.19;
-    const text = new THREE.Mesh(new THREE.PlaneGeometry(0.7 + distance * 0.03, 0.2), new THREE.MeshBasicMaterial({
-      map: textTexture([i % 2 ? '0x000000F4' : 'NOT FOUND'], { width: 640, height: 130, size: 49 }),
-      transparent: true, opacity: 0.53, side: THREE.DoubleSide,
-    }));
-    text.position.set(Math.cos(angle) * radius * 0.77, Math.sin(angle) * radius * 0.77, -distance);
-    text.rotation.z = angle * 0.1;
-    group.add(text);
+
+  /* ---------- server racks in two arcs ---------- */
+  const rackLEDs: THREE.MeshStandardMaterial[] = [];
+  const rackRows: [number, number][] = [
+    [-26, -8], [26, -8],
+  ];
+  for (const [side, zOff] of rackRows) {
+    for (let i = -2; i <= 2; i++) {
+      const rack = await load('/models/server_rack.glb');
+      rack.scale.setScalar(1.55);
+      const x = side + i * 2.6;
+      const z = zOff + Math.abs(i) * 1.6;
+      rack.position.set(x, terrainHeightAt(x, z), z);
+      rack.rotation.y = side < 0 ? Math.PI / 2.6 : -Math.PI / 2.6;
+      group.add(rack);
+      // add an LED strip mesh so engine can blink it
+      const ledMat = new THREE.MeshStandardMaterial({ color: 0x061018, emissive: 0x18ff9a, emissiveIntensity: 2.6, roughness: 0.4 });
+      const led = new THREE.Mesh(new THREE.BoxGeometry(0.5, 1.6, 0.03), ledMat);
+      led.position.set(0, 1.35, side < 0 ? 0.72 : 0.72);
+      rack.add(led);
+      rackLEDs.push(ledMat);
+    }
   }
+
+  /* ---------- floating motherboard strata ---------- */
+  for (let i = 0; i < 4; i++) {
+    const mb = await load('/models/motherboard.glb');
+    mb.scale.setScalar(9 + i * 3.2);
+    const a = rnd() * Math.PI * 2;
+    const r = 18 + rnd() * 18;
+    mb.position.set(Math.cos(a) * r, 6.5 + rnd() * 6, Math.sin(a) * r);
+    mb.rotation.set(rnd() * 0.7 - 0.35, rnd() * Math.PI * 2, rnd() * 0.5 - 0.25);
+    group.add(mb);
+  }
+
+  /* ---------- great arcs of cable suspended in the void ---------- */
+  const cableBig = await load('/models/cables.glb');
+  for (let i = 0; i < 5; i++) {
+    const cable = cableBig.clone();
+    cable.scale.setScalar(0.055 + rnd() * 0.02);
+    const a = (i / 5) * Math.PI * 2 + 0.5;
+    const r = 34 + rnd() * 16;
+    cable.position.set(Math.cos(a) * r, 12 + rnd() * 9, Math.sin(a) * r);
+    cable.rotation.set(rnd() * 1.2 - 0.6, rnd() * Math.PI * 2, rnd() * 1.4 - 0.7);
+    group.add(cable);
+  }
+
+  /* ---------- the office chair, eternally orbiting ---------- */
+  const chair = await load('/models/office_chair.glb');
+  chair.scale.setScalar(2.4);
+  chair.position.set(0, 26, 0);
+  chair.name = 'void_chair';
+  group.add(chair);
+
+  /* ---------- floating error dialogs & glyph columns ---------- */
+  const dialogSeeds: [string, string, string][] = [
+    ['dlg-1', '致命的なエラー', 'オペレーティングシステムは動作を停止しました'],
+    ['dlg-2', '回復', 'PCの再起動を待つか、電源を切ってください'],
+    ['dlg-3', '警告', 'この操作は取り消すことができません'],
+    ['dlg-4', 'SYSTEM', 'MEMORY_MANAGEMENT 障害が発生しました'],
+    ['dlg-5', '停止', 'CRITICAL_PROCESS_DIED 収集中です'],
+  ];
+  const floatingGlyphs: THREE.Mesh[] = [];
+  dialogSeeds.forEach(([seed, title, msg], i) => {
+    const tex = makeDialogTexture(seed, title, msg);
+    const m = new THREE.Mesh(
+      new THREE.PlaneGeometry(2.6, 1.62),
+      new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide, toneMapped: false, opacity: 0.92 })
+    );
+    const a = (i / dialogSeeds.length) * Math.PI * 2 + 0.9;
+    m.position.set(Math.cos(a) * (13 + i * 4.2), 2.6 + (i * 1.7) % 5.5, Math.sin(a) * (13 + i * 4.2));
+    m.rotation.y = -a + Math.PI / 2 + (rnd() - 0.5);
+    group.add(m);
+    floatingGlyphs.push(m);
+  });
+  for (let i = 0; i < 26; i++) {
+    const hue = (['cyan', 'amber', 'red', 'white'] as const)[Math.floor(rnd() * 4)];
+    const tex = makeGlyphColumnTexture('glyph-' + i, hue);
+    const m = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.85, 3.4),
+      new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false, opacity: 0.85 })
+    );
+    const a = rnd() * Math.PI * 2;
+    const r = 9 + rnd() * 42;
+    m.position.set(Math.cos(a) * r, 1.6 + rnd() * 6.5, Math.sin(a) * r);
+    m.rotation.y = rnd() * Math.PI * 2;
+    group.add(m);
+    floatingGlyphs.push(m);
+  }
+
+  /* ---------- instanced shard rain (ambient debris) ---------- */
+  const shardGeo = new THREE.TetrahedronGeometry(0.16);
+  const shardMat = new THREE.MeshStandardMaterial({ color: 0x1b4a7a, emissive: 0x1e6fa8, emissiveIntensity: 1.6, roughness: 0.3, metalness: 0.6, flatShading: true });
+  const shardInst = new THREE.InstancedMesh(shardGeo, shardMat, 130);
+  const dummy = new THREE.Object3D();
+  const shardBase: { x: number; y: number; z: number; s: number; ph: number }[] = [];
+  for (let i = 0; i < 130; i++) {
+    const a = rnd() * Math.PI * 2;
+    const r = 4 + rnd() * 48;
+    const y = 0.6 + rnd() * 11;
+    shardBase.push({ x: Math.cos(a) * r, y, z: Math.sin(a) * r, s: 0.5 + rnd() * 2.4, ph: rnd() * Math.PI * 2 });
+    dummy.position.set(shardBase[i].x, y, shardBase[i].z);
+    dummy.scale.setScalar(shardBase[i].s);
+    dummy.updateMatrix();
+    shardInst.setMatrixAt(i, dummy.matrix);
+  }
+  shardInst.instanceMatrix.needsUpdate = true;
+  group.add(shardInst);
+
+  /* ---------- the WAKE_UP revelation (hidden until close) ---------- */
+  const wakeTex = makeWakeTextTexture();
+  const wakeSign = new THREE.Mesh(
+    new THREE.PlaneGeometry(9.2, 2.3),
+    new THREE.MeshBasicMaterial({ map: wakeTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, toneMapped: false, fog: false, opacity: 0 })
+  );
+  wakeSign.position.set(0, 7.2, 0);
+  group.add(wakeSign);
+  const wakeLight = new THREE.PointLight(0x6df2ff, 0, 30, 1.6);
+  wakeLight.position.set(0, 6, 0);
+  group.add(wakeLight);
+
+  /* ---------- collapse: floor dais shard meshes (hidden until needed) ---------- */
+  const fallers: THREE.Mesh[] = [];
+  const fallerMat = new THREE.MeshStandardMaterial({ color: 0x16305a, emissive: 0x0e4a75, emissiveIntensity: 1.1, roughness: 0.4, metalness: 0.65, flatShading: true });
+  const fallerGeo = new THREE.TetrahedronGeometry(0.62, 0);
+  for (let i = 0; i < 44; i++) {
+    const a = rnd() * Math.PI * 2;
+    const r = Math.pow(rnd(), 0.6) * 3.1;
+    const m = new THREE.Mesh(fallerGeo, fallerMat);
+    m.position.set(Math.cos(a) * r, daisY + 0.1, Math.sin(a) * r);
+    m.scale.set(0.5 + rnd() * 1.5, 0.3 + rnd() * 0.75, 0.5 + rnd() * 1.5);
+    m.rotation.set(rnd() * 3, rnd() * 3, rnd() * 3);
+    m.visible = false;
+    m.userData.vel = new THREE.Vector3();
+    m.userData.angVel = new THREE.Vector3();
+    group.add(m);
+    fallers.push(m);
+  }
+
+  /* ---------- falling streak particles (activated during descent) ---------- */
+  const streakTex = makeDotTexture();
+  const streakCount = 240;
+  const streakPos = new Float32Array(streakCount * 3);
+  for (let i = 0; i < streakCount; i++) {
+    const a = rnd() * Math.PI * 2;
+    const r = 2 + rnd() * 30;
+    streakPos[i * 3] = Math.cos(a) * r;
+    streakPos[i * 3 + 1] = rnd() * 40 - 6;
+    streakPos[i * 3 + 2] = Math.sin(a) * r;
+  }
+  const streakGeo = new THREE.BufferGeometry();
+  streakGeo.setAttribute('position', new THREE.BufferAttribute(streakPos, 3));
+  const streaks = new THREE.Points(
+    streakGeo,
+    new THREE.PointsMaterial({ map: streakTex, color: 0xaef4ff, size: 0.34, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false })
+  );
+  streaks.name = 'fall_streaks';
+  group.add(streaks);
+
+  /* ---------- red emergency beacon (collapse only) ---------- */
+  const redBeacon = new THREE.SpotLight(0xff2a1e, 0, 46, 0.75, 0.5, 1.4);
+  redBeacon.position.set(0, 9.5, 0);
+  redBeacon.target.position.set(0, 0, 0);
+  group.add(redBeacon, redBeacon.target);
+
+  /* ---------- colliders ---------- */
+  const colliders = [{ x: 0, z: 0, r: 7.35 }]; // the Cray dais
+  const boxColliders: { minX: number; maxX: number; minZ: number; maxZ: number }[] = [];
+  for (const [side, zOff] of rackRows) {
+    for (let i = -2; i <= 2; i++) {
+      const x = side + i * 2.6;
+      const z = zOff + Math.abs(i) * 1.6;
+      boxColliders.push({ minX: x - 0.72, maxX: x + 0.72, minZ: z - 0.8, maxZ: z + 0.8 });
+    }
+  }
+
+  const spawn = { pos: new THREE.Vector3(0, 0.62, 27), yaw: 0 }; // forward = (0,0,-1): faces the Cray
+
   return {
-    group, face, rings,
-    update(time, growth, gentle) {
-      const size = 0.9 + growth * 2.7;
-      group.scale.set(size, size, 1);
-      face.scale.setScalar(1 + growth * 0.12);
-      rings.forEach((ring, i) => {
-        ring.rotation.z = i * 0.12 + (gentle ? 0 : Math.sin(time * 0.6 + i * 0.4) * growth * 0.04);
-      });
-    },
+    group,
+    revealRadius: 13.2,
+    center: new THREE.Vector3(0, 0, 0),
+    cray,
+    daisCore,
+    daisRing,
+    wakeSign,
+    halo,
+    wakeLight,
+    redBeacon,
+    crack,
+    shards: fallers,
+    fallers,
+    colliders,
+    boxColliders,
+    boundsRadius: WORLD_RADIUS * 0.94,
+    spawn,
+    surgeTimer: 18,
+    floatingGlyphs,
+    rackLEDs,
   };
+}
+
+/** Cheap height sample matching the displacement function (for rack placement). */
+export function terrainHeightAt(x: number, z: number): number {
+  const d = Math.sqrt(x * x + z * z);
+  const dune = (fbm2(x * 0.055 + 9, z * 0.055 + 3, 4) - 0.5) * 2.6;
+  const ridge = Math.pow(fbm2(x * 0.016 + 40, z * 0.016 + 8, 3), 2.2) * 9.5;
+  const rim = THREE.MathUtils.smoothstep(d, WORLD_RADIUS * 0.72, WORLD_RADIUS + 10);
+  const bowl = THREE.MathUtils.smoothstep(d, 4.5, 15);
+  return dune * bowl + ridge * rim - rim * 2.5;
 }
